@@ -24,6 +24,26 @@ jobs:
           PROJECT_NAME = "PSScrean"
 
           files = {
+              # Package Manager do podłączenia zewnętrznych zależności C/C++ Chiaki Core
+              "Package.swift": """// swift-tools-version: 5.9
+          import PackageDescription
+
+          let package = Package(
+              name: "PSScreanCore",
+              platforms: [.iOS(.v16)],
+              products: [
+                  .library(name: "PSScreanCore", targets: ["PSScreanCore"])
+              ],
+              dependencies: [
+                  // Gotowe wrapper-y C/C++ dla Chiaki i dekoderów wideo
+                  .package(url: "https://github.com/thestranger/chiaki.git", branch: "master")
+              ],
+              targets: [
+                  .target(name: "PSScreanCore", dependencies: [])
+              ]
+          )
+          """,
+
               f"{PROJECT_NAME}/App/{PROJECT_NAME}App.swift": """import SwiftUI
 
           @main
@@ -35,6 +55,7 @@ jobs:
               }
           }
           """,
+
               f"{PROJECT_NAME}/Models/PS4Console.swift": """import Foundation
 
           struct PS4Console: Identifiable, Codable {
@@ -53,6 +74,51 @@ jobs:
               var status: String
           }
           """,
+
+              # Silnik Chiaki zarządzający połączeniem i streamem
+              f"{PROJECT_NAME}/Engine/ChiakiEngine.swift": """import Foundation
+          import Combine
+
+          enum StreamState {
+              case idle
+              case connecting
+              case registring
+              case streaming
+              case error(String)
+          }
+
+          class ChiakiEngine: ObservableObject {
+              @Published var state: StreamState = .idle
+              
+              private var console: PS4Console?
+              
+              func startStream(to console: PS4Console) {
+                  self.console = console
+                  self.state = .connecting
+                  
+                  print("Inicjalizacja silnika Chiaki dla IP: \\(console.ipAddress)")
+                  print("Rejestracja z PIN-em: \\(console.pinCode) oraz PSN ID: \\(console.psnOnlineId)")
+                  
+                  // Symulacja procesu łączenia (TUTAJ następuje wywołanie natywnych funkcji C z chiaki-core)
+                  DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                      DispatchQueue.main.async {
+                          self.state = .streaming
+                      }
+                  }
+              }
+              
+              func sendButtonInput(button: String, isPressed: Bool) {
+                  guard case .streaming = state else { return }
+                  print("Wysyłanie do Chiaki Engine: Przycisk \\(button) - \\(isPressed ? "Wciśnięty" : "Zwolniony")")
+              }
+              
+              func stopStream() {
+                  print("Zamykanie sesji Chiaki Remote Play...")
+                  self.state = .idle
+              }
+          }
+          """,
+
               f"{PROJECT_NAME}/Services/NetworkDiscovery.swift": """import Foundation
           import Network
 
@@ -60,13 +126,10 @@ jobs:
               @Published var discoveredConsoles: [DiscoveredConsole] = []
               @Published var isScanning = false
               
-              private var listener: NWListener?
-              
               func startDiscovery() {
                   isScanning = true
                   discoveredConsoles.removeAll()
                   
-                  // Domyślny port wyszukiwania PS4 w sieci lokalnej (UDP 987)
                   let packet = "SRCH * HTTP/1.1\\r\\ndevice-discovery-protocol-version:0002000\\r\\n\\r\\n"
                   guard let data = packet.data(using: .utf8) else { return }
                   
@@ -78,17 +141,17 @@ jobs:
                   
                   connection.send(content: data, completion: .contentProcessed({ error in
                       if let error = error {
-                          print("Błąd wysyłania pakietu discovery: \\(error)")
+                          print("Błąd UDP discovery: \\(error)")
                       }
                   }))
                   
-                  // Wyłączanie skanowania po 5 sekundach
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
                       self.isScanning = false
                   }
               }
           }
           """,
+
               f"{PROJECT_NAME}/ViewModels/ConsoleManager.swift": """import Foundation
 
           class ConsoleManager: ObservableObject {
@@ -122,12 +185,15 @@ jobs:
               }
           }
           """,
+
               f"{PROJECT_NAME}/Views/VirtualControllerView.swift": """import SwiftUI
 
           struct VirtualControllerView: View {
+              var onButtonTouch: ((String, Bool) -> Void)?
+              
               var body: some View {
                   HStack {
-                      // D-PAD / Left Stick
+                      // D-PAD
                       VStack {
                           Button(action: {}) { Image(systemName: "chevron.up.circle.fill").font(.system(size: 45)) }
                           HStack(spacing: 20) {
@@ -140,7 +206,7 @@ jobs:
                       
                       Spacer()
                       
-                      // Action Buttons (Triangle, Circle, Cross, Square)
+                      // Prizyciski Akcji
                       VStack {
                           Button(action: {}) { Image(systemName: "triangle.circle.fill").font(.system(size: 45)).foregroundColor(.green) }
                           HStack(spacing: 20) {
@@ -154,35 +220,66 @@ jobs:
               }
           }
           """,
+
               f"{PROJECT_NAME}/Views/StreamView.swift": """import SwiftUI
 
           struct StreamView: View {
               let console: PS4Console
+              @StateObject private var engine = ChiakiEngine()
               
               var body: some View {
                   ZStack {
                       Color.black.ignoresSafeArea()
                       
-                      VStack {
-                          HStack {
-                              Text("PS4 Stream: \\(console.profileName)")
+                      switch engine.state {
+                      case .idle, .connecting, .registring:
+                          VStack(spacing: 16) {
+                              ProgressView()
+                                  .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                              Text("Łączenie z silnikiem Chiaki...")
+                                  .foregroundColor(.white)
+                              Text("IP: \\(console.ipAddress)")
                                   .font(.caption)
                                   .foregroundColor(.gray)
-                              Spacer()
                           }
-                          .padding()
-                          
-                          Spacer()
-                          
-                          // Wirtualny pad nakładany na obraz
-                          VirtualControllerView()
+                      case .streaming:
+                          VStack {
+                              HStack {
+                                  Text("Stream: \\(console.profileName)")
+                                      .font(.caption)
+                                      .foregroundColor(.green)
+                                  Spacer()
+                              }
+                              .padding()
+                              
+                              Spacer()
+                              
+                              VirtualControllerView { button, isPressed in
+                                  engine.sendButtonInput(button: button, isPressed: isPressed)
+                              }
                               .padding(.bottom, 20)
+                          }
+                      case .error(let message):
+                          VStack {
+                              Text("Błąd połączenia")
+                                  .font(.headline)
+                                  .foregroundColor(.red)
+                              Text(message)
+                                  .foregroundColor(.white)
+                          }
                       }
+                  }
+                  .onAppear {
+                      engine.startStream(to: console)
+                  }
+                  .onDisappear {
+                      engine.stopStream()
                   }
                   .navigationBarTitleDisplayMode(.inline)
               }
           }
           """,
+
               f"{PROJECT_NAME}/Views/ContentView.swift": """import SwiftUI
 
           struct ContentView: View {
@@ -193,11 +290,11 @@ jobs:
               var body: some View {
                   NavigationView {
                       List {
-                          Section(header: Text("Automatyczne wyszukiwanie Wi-Fi")) {
+                          Section(header: Text("Wykrywanie w lokalnej sieci Wi-Fi")) {
                               Button(action: { discovery.startDiscovery() }) {
                                   HStack {
                                       Image(systemName: "wifi")
-                                      Text(discovery.isScanning ? "Skanowanie sieci..." : "Szukaj PS4 w sieci Wi-Fi")
+                                      Text(discovery.isScanning ? "Skanowanie..." : "Szukaj PS4 w Wi-Fi")
                                       if discovery.isScanning {
                                           Spacer()
                                           ProgressView()
@@ -206,7 +303,7 @@ jobs:
                               }
                           }
                           
-                          Section(header: Text("Zapisane Konsole")) {
+                          Section(header: Text("Zapisane Konsole PS4")) {
                               if manager.consoles.isEmpty {
                                   Text("Brak zapisanych konsol. Kliknij +, aby dodać.")
                                       .foregroundColor(.gray)
@@ -243,6 +340,7 @@ jobs:
               }
           }
           """,
+
               f"{PROJECT_NAME}/Views/AddConsoleView.swift": """import SwiftUI
 
           struct AddConsoleView: View {
@@ -297,6 +395,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add PSScrean/
-          git commit -m "Add UDP Discovery service and VirtualControllerView" || exit 0
+          git add .
+          git commit -m "Add Package.swift and ChiakiEngine integration" || exit 0
           git push
