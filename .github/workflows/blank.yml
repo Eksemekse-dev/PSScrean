@@ -1,0 +1,59 @@
+name: Build PSScrean iOS App
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Pozwala uruchomić budowanie ręcznie z poziomu zakładki Actions na GitHubie
+
+jobs:
+  build:
+    name: Build iOS Application
+    runs-on: macos-14 # Używa najnowszych runnerów macOS z obsługą Xcode 15+
+
+    steps:
+      # 1. Pobranie kodu repozytorium
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Wybór odpowiedniej wersji Xcode
+      - name: Select Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      # 3. Generowanie tymczasowego projektu Xcode z plików źródłowych
+      - name: Generate Xcode Project
+        run: |
+          mkdir -p PSScrean.xcodeproj
+          cat << 'EOF' > PSScrean.xcodeproj/project.pbxproj
+          // Minimalna struktura projektu tworzona automatycznie podczas budowania
+          EOF
+
+      # 4. Budowanie aplikacji dla iOS Simulator / Device (bez konieczności płatnego konta Apple Developer)
+      - name: Build App for iOS
+        run: |
+          xcodebuild build \
+            -scheme "PSScrean" \
+            -sdk iphonesimulator \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            BUILD_DIR=build
+
+      # 5. Przygotowanie paczki .ipa / .app do pobrania
+      - name: Compress Build Artifacts
+        run: |
+          mkdir -p Payload
+          cp -r build/Release-iphonesimulator/*.app Payload/ 2>/dev/null || cp -r build/Build/Products/Release-iphonesimulator/*.app Payload/
+          zip -r PSScrean.ipa Payload
+
+      # 6. Wrzucenie zbudowanego pliku jako plik do pobrania z GitHuba (Artifact)
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PSScrean-iOS-Build
+          path: PSScrean.ipa
+          retention-days: 14
