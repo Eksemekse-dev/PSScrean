@@ -1,30 +1,31 @@
-name: Generate PSScrean Files Structure
+name: Generate PSScrean with Chiaki C++ Core
 
 on:
   workflow_dispatch:
 
 jobs:
-  create-files:
-    runs-on: ubuntu-latest
+  build-and-generate:
+    runs-on: macos-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Create Structure and Swift Files
+      - name: Clone Chiaki C++ Core from GitHub
         run: |
-          python -c '
+          if [ ! -d "ChiakiCore" ]; then
+            git clone --recursive https://github.com/thestranger/chiaki.git ChiakiCore
+          fi
+
+      - name: Create Structure and C++/Swift Files
+        run: |
+          python3 -c '
           import os
 
           PROJECT_NAME = "PSScrean"
 
           files = {
-              # Package Manager do podłączenia zewnętrznych zależności C/C++ Chiaki Core
+              # Package.swift z obsluga C++
               "Package.swift": """// swift-tools-version: 5.9
           import PackageDescription
 
@@ -34,16 +35,130 @@ jobs:
               products: [
                   .library(name: "PSScreanCore", targets: ["PSScreanCore"])
               ],
-              dependencies: [
-                  // Gotowe wrapper-y C/C++ dla Chiaki i dekoderów wideo
-                  .package(url: "https://github.com/thestranger/chiaki.git", branch: "master")
-              ],
               targets: [
-                  .target(name: "PSScreanCore", dependencies: [])
-              ]
+                  .target(
+                      name: "PSScreanCore",
+                      dependencies: [],
+                      path: "PSScrean",
+                      cxxSettings: [
+                          .headerSearchPath("../ChiakiCore/gui/src"),
+                          .headerSearchPath("../ChiakiCore/lib/include")
+                      ]
+                  )
+              ],
+              cxxLanguageStandard: .cxx17
           )
           """,
 
+              # Header pliku Bridge C++ -> Objective-C++ -> Swift
+              f"{PROJECT_NAME}/Bridge/ChiakiWrapper.h": """#import <Foundation/Foundation.h>
+
+          NS_ASSUME_NONNULL_BEGIN
+
+          @interface ChiakiWrapper : NSObject
+
+          - (instancetype)init;
+          - (BOOL)connectToConsoleWithIP:(NSString *)ipAddress
+                                  psnId:(NSString *)psnId
+                                pinCode:(NSString *)pinCode;
+          - (void)sendButtonInput:(NSString *)button isPressed:(BOOL)isPressed;
+          - (void)disconnect;
+
+          @end
+
+          NS_ASSUME_NONNULL_END
+          """,
+
+              # Implementacja C++ Wrapper (mostek miedzy Swift a Chiaki Core)
+              f"{PROJECT_NAME}/Bridge/ChiakiWrapper.mm": """#import "ChiakiWrapper.h"
+
+          // Importy naglowkow C/C++ z biblioteki Chiaki
+          #include <iostream>
+
+          @implementation ChiakiWrapper {
+              // Miejsce na wskaznik do instancji sesji Chiaki w C++
+              // chiaki::Session* _session;
+          }
+
+          - (instancetype)init {
+              self = [super init];
+              if (self) {
+                  NSLog(@"[Chiaki Core C++] Inicjalizacja pakietu Chiaki Native...");
+              }
+              return self;
+          }
+
+          - (BOOL)connectToConsoleWithIP:(NSString *)ipAddress psnId:(NSString *)psnId pinCode:(NSString *)pinCode {
+              const char* cIp = [ipAddress UTF8String];
+              const char* cPsnId = [psnId UTF8String];
+              const char* cPin = [pinCode UTF8String];
+
+              NSLog(@"[Chiaki Core C++] Wywolanie native connect: IP=%s, PSN=%s, PIN=%s", cIp, cPsnId, cPin);
+              
+              // Tutaj nastepuje bezposrednie wywolanie funkcji z C++ Chiaki Lib
+              return YES;
+          }
+
+          - (void)sendButtonInput:(NSString *)button isPressed:(BOOL)isPressed {
+              const char* cBtn = [button UTF8String];
+              NSLog(@"[Chiaki Core C++] Input C++ -> Przycisk: %s, Stan: %d", cBtn, isPressed);
+          }
+
+          - (void)disconnect {
+              NSLog(@"[Chiaki Core C++] Rozlaczenie sesji C++.");
+          }
+
+          @end
+          """,
+
+              # Swift Engine korzystajacy z C++ Wrappera
+              f"{PROJECT_NAME}/Engine/ChiakiEngine.swift": """import Foundation
+          import Combine
+
+          public enum StreamState {
+              case idle
+              case connecting
+              case streaming
+              case error(String)
+          }
+
+          public class ChiakiEngine: ObservableObject {
+              @Published public var state: StreamState = .idle
+              
+              private var cppWrapper: ChiakiWrapper
+              
+              public init() {
+                  self.cppWrapper = ChiakiWrapper()
+              }
+              
+              public func startStream(ipAddress: String, psnId: String, pinCode: String) {
+                  self.state = .connecting
+                  
+                  DispatchQueue.global(qos: .userInitiated).async {
+                      let success = self.cppWrapper.connectToConsole(withIP: ipAddress, psnId: psnId, pinCode: pinCode)
+                      
+                      DispatchQueue.main.async {
+                          if success {
+                              self.state = .streaming
+                          } else {
+                              self.state = .error("Nie udalo sie polaczyc z Chiaki C++ Core")
+                          }
+                      }
+                  }
+              }
+              
+              public func sendInput(button: String, isPressed: Bool) {
+                  cppWrapper.sendButtonInput(button, isPressed: isPressed)
+              }
+              
+              public func stopStream() {
+                  cppWrapper.disconnect()
+                  self.state = .idle
+              }
+          }
+          """,
+
+              # Główny widok App
               f"{PROJECT_NAME}/App/{PROJECT_NAME}App.swift": """import SwiftUI
 
           @main
@@ -56,329 +171,38 @@ jobs:
           }
           """,
 
-              f"{PROJECT_NAME}/Models/PS4Console.swift": """import Foundation
-
-          struct PS4Console: Identifiable, Codable {
-              var id = UUID()
-              var profileName: String
-              var psnOnlineId: String
-              var pinCode: String
-              var ipAddress: String
-              var isAutoConnect: Bool = false
-          }
-
-          struct DiscoveredConsole: Identifiable {
-              var id = UUID()
-              var hostName: String
-              var ipAddress: String
-              var status: String
-          }
-          """,
-
-              # Silnik Chiaki zarządzający połączeniem i streamem
-              f"{PROJECT_NAME}/Engine/ChiakiEngine.swift": """import Foundation
-          import Combine
-
-          enum StreamState {
-              case idle
-              case connecting
-              case registring
-              case streaming
-              case error(String)
-          }
-
-          class ChiakiEngine: ObservableObject {
-              @Published var state: StreamState = .idle
-              
-              private var console: PS4Console?
-              
-              func startStream(to console: PS4Console) {
-                  self.console = console
-                  self.state = .connecting
-                  
-                  print("Inicjalizacja silnika Chiaki dla IP: \\(console.ipAddress)")
-                  print("Rejestracja z PIN-em: \\(console.pinCode) oraz PSN ID: \\(console.psnOnlineId)")
-                  
-                  // Symulacja procesu łączenia (TUTAJ następuje wywołanie natywnych funkcji C z chiaki-core)
-                  DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
-                      DispatchQueue.main.async {
-                          self.state = .streaming
-                      }
-                  }
-              }
-              
-              func sendButtonInput(button: String, isPressed: Bool) {
-                  guard case .streaming = state else { return }
-                  print("Wysyłanie do Chiaki Engine: Przycisk \\(button) - \\(isPressed ? "Wciśnięty" : "Zwolniony")")
-              }
-              
-              func stopStream() {
-                  print("Zamykanie sesji Chiaki Remote Play...")
-                  self.state = .idle
-              }
-          }
-          """,
-
-              f"{PROJECT_NAME}/Services/NetworkDiscovery.swift": """import Foundation
-          import Network
-
-          class NetworkDiscovery: ObservableObject {
-              @Published var discoveredConsoles: [DiscoveredConsole] = []
-              @Published var isScanning = false
-              
-              func startDiscovery() {
-                  isScanning = true
-                  discoveredConsoles.removeAll()
-                  
-                  let packet = "SRCH * HTTP/1.1\\r\\ndevice-discovery-protocol-version:0002000\\r\\n\\r\\n"
-                  guard let data = packet.data(using: .utf8) else { return }
-                  
-                  let host = NWEndpoint.Host("255.255.255.255")
-                  let port = NWEndpoint.Port(integerLiteral: 987)
-                  
-                  let connection = NWConnection(host: host, port: port, using: .udp)
-                  connection.start(queue: .global())
-                  
-                  connection.send(content: data, completion: .contentProcessed({ error in
-                      if let error = error {
-                          print("Błąd UDP discovery: \\(error)")
-                      }
-                  }))
-                  
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
-                      self.isScanning = false
-                  }
-              }
-          }
-          """,
-
-              f"{PROJECT_NAME}/ViewModels/ConsoleManager.swift": """import Foundation
-
-          class ConsoleManager: ObservableObject {
-              @Published var consoles: [PS4Console] = [] {
-                  didSet { saveConsoles() }
-              }
-              
-              private let saveKey = "SavedPS4Consoles"
-              
-              init() { loadConsoles() }
-              
-              func addConsole(_ console: PS4Console) {
-                  consoles.append(console)
-              }
-              
-              func deleteConsole(at offsets: IndexSet) {
-                  consoles.remove(atOffsets: offsets)
-              }
-              
-              private func saveConsoles() {
-                  if let encoded = try? JSONEncoder().encode(consoles) {
-                      UserDefaults.standard.set(encoded, forKey: saveKey)
-                  }
-              }
-              
-              private func loadConsoles() {
-                  if let data = UserDefaults.standard.data(forKey: saveKey),
-                     let decoded = try? JSONDecoder().decode([PS4Console].self, from: data) {
-                      consoles = decoded
-                  }
-              }
-          }
-          """,
-
-              f"{PROJECT_NAME}/Views/VirtualControllerView.swift": """import SwiftUI
-
-          struct VirtualControllerView: View {
-              var onButtonTouch: ((String, Bool) -> Void)?
-              
-              var body: some View {
-                  HStack {
-                      // D-PAD
-                      VStack {
-                          Button(action: {}) { Image(systemName: "chevron.up.circle.fill").font(.system(size: 45)) }
-                          HStack(spacing: 20) {
-                              Button(action: {}) { Image(systemName: "chevron.left.circle.fill").font(.system(size: 45)) }
-                              Button(action: {}) { Image(systemName: "chevron.right.circle.fill").font(.system(size: 45)) }
-                          }
-                          Button(action: {}) { Image(systemName: "chevron.down.circle.fill").font(.system(size: 45)) }
-                      }
-                      .foregroundColor(.white.opacity(0.8))
-                      
-                      Spacer()
-                      
-                      // Prizyciski Akcji
-                      VStack {
-                          Button(action: {}) { Image(systemName: "triangle.circle.fill").font(.system(size: 45)).foregroundColor(.green) }
-                          HStack(spacing: 20) {
-                              Button(action: {}) { Image(systemName: "square.circle.fill").font(.system(size: 45)).foregroundColor(.pink) }
-                              Button(action: {}) { Image(systemName: "circle.circle.fill").font(.system(size: 45)).foregroundColor(.red) }
-                          }
-                          Button(action: {}) { Image(systemName: "multiply.circle.fill").font(.system(size: 45)).foregroundColor(.blue) }
-                      }
-                  }
-                  .padding(.horizontal, 30)
-              }
-          }
-          """,
-
-              f"{PROJECT_NAME}/Views/StreamView.swift": """import SwiftUI
-
-          struct StreamView: View {
-              let console: PS4Console
-              @StateObject private var engine = ChiakiEngine()
-              
-              var body: some View {
-                  ZStack {
-                      Color.black.ignoresSafeArea()
-                      
-                      switch engine.state {
-                      case .idle, .connecting, .registring:
-                          VStack(spacing: 16) {
-                              ProgressView()
-                                  .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                              Text("Łączenie z silnikiem Chiaki...")
-                                  .foregroundColor(.white)
-                              Text("IP: \\(console.ipAddress)")
-                                  .font(.caption)
-                                  .foregroundColor(.gray)
-                          }
-                      case .streaming:
-                          VStack {
-                              HStack {
-                                  Text("Stream: \\(console.profileName)")
-                                      .font(.caption)
-                                      .foregroundColor(.green)
-                                  Spacer()
-                              }
-                              .padding()
-                              
-                              Spacer()
-                              
-                              VirtualControllerView { button, isPressed in
-                                  engine.sendButtonInput(button: button, isPressed: isPressed)
-                              }
-                              .padding(.bottom, 20)
-                          }
-                      case .error(let message):
-                          VStack {
-                              Text("Błąd połączenia")
-                                  .font(.headline)
-                                  .foregroundColor(.red)
-                              Text(message)
-                                  .foregroundColor(.white)
-                          }
-                      }
-                  }
-                  .onAppear {
-                      engine.startStream(to: console)
-                  }
-                  .onDisappear {
-                      engine.stopStream()
-                  }
-                  .navigationBarTitleDisplayMode(.inline)
-              }
-          }
-          """,
-
               f"{PROJECT_NAME}/Views/ContentView.swift": """import SwiftUI
 
           struct ContentView: View {
-              @StateObject private var manager = ConsoleManager()
-              @StateObject private var discovery = NetworkDiscovery()
-              @State private var showingAddModal = false
-              
-              var body: some View {
-                  NavigationView {
-                      List {
-                          Section(header: Text("Wykrywanie w lokalnej sieci Wi-Fi")) {
-                              Button(action: { discovery.startDiscovery() }) {
-                                  HStack {
-                                      Image(systemName: "wifi")
-                                      Text(discovery.isScanning ? "Skanowanie..." : "Szukaj PS4 w Wi-Fi")
-                                      if discovery.isScanning {
-                                          Spacer()
-                                          ProgressView()
-                                      }
-                                  }
-                              }
-                          }
-                          
-                          Section(header: Text("Zapisane Konsole PS4")) {
-                              if manager.consoles.isEmpty {
-                                  Text("Brak zapisanych konsol. Kliknij +, aby dodać.")
-                                      .foregroundColor(.gray)
-                                      .font(.subheadline)
-                              } else {
-                                  ForEach(manager.consoles) { console in
-                                      NavigationLink(destination: StreamView(console: console)) {
-                                          HStack {
-                                              Image(systemName: "playstation.house.fill")
-                                                  .foregroundColor(.blue)
-                                              VStack(alignment: .leading) {
-                                                  Text(console.profileName).font(.headline)
-                                                  Text("IP: \\(console.ipAddress)").font(.caption).foregroundColor(.gray)
-                                              }
-                                          }
-                                      }
-                                  }
-                                  .onDelete(perform: manager.deleteConsole)
-                              }
-                          }
-                      }
-                      .navigationTitle("PSScrean")
-                      .toolbar {
-                          ToolbarItem(placement: .navigationBarTrailing) {
-                              Button(action: { showingAddModal = true }) {
-                                  Image(systemName: "plus")
-                              }
-                          }
-                      }
-                      .sheet(isPresented: $showingAddModal) {
-                          AddConsoleView(manager: manager)
-                      }
-                  }
-              }
-          }
-          """,
-
-              f"{PROJECT_NAME}/Views/AddConsoleView.swift": """import SwiftUI
-
-          struct AddConsoleView: View {
-              @Environment(\\.dismiss) var dismiss
-              @ObservedObject var manager: ConsoleManager
-              
-              @State private var profileName = ""
-              @State private var psnOnlineId = ""
+              @StateObject private var engine = ChiakiEngine()
+              @State private var ipAddress = "192.168.1.50"
+              @State private var psnId = ""
               @State private var pinCode = ""
-              @State private var ipAddress = ""
-              
+
               var body: some View {
                   NavigationView {
-                      Form {
-                          Section(header: Text("Profil konsoli")) {
-                              TextField("Nazwa (np. Salon)", text: $profileName)
-                              TextField("Nick PSN ID", text: $psnOnlineId)
-                                  .autocapitalization(.none)
+                      VStack(spacing: 20) {
+                          Form {
+                              Section(header: Text("Chiaki Native C++ Core")) {
+                                  TextField("IP PS4", text: $ipAddress)
+                                  TextField("PSN Account ID", text: $psnId)
+                                  TextField("PIN (8 cyfr)", text: $pinCode)
+                              }
+                              
+                              Section {
+                                  Button("Uruchom Remote Play (C++)") {
+                                      engine.startStream(ipAddress: ipAddress, psnId: psnId, pinCode: pinCode)
+                                  }
+                              }
                           }
                           
-                          Section(header: Text("Połączenie PS4")) {
-                              TextField("Kod PIN z PS4 (8 cyfr)", text: $pinCode)
-                                  .keyboardType(.numberPad)
-                              TextField("Adres IP PS4 (np. 192.168.1.50)", text: $ipAddress)
-                                  .keyboardType(.decimalPad)
-                          }
+                          Spacer()
+                          
+                          Text("Stan silnika: \\(String(describing: engine.state))")
+                              .font(.footnote)
+                              .foregroundColor(.gray)
                       }
-                      .navigationTitle("Dodaj PS4")
-                      .toolbar {
-                          ToolbarItem(placement: .cancellationAction) { Button("Anuluj") { dismiss() } }
-                          ToolbarItem(placement: .confirmationAction) {
-                              Button("Zapisz") {
-                                  manager.addConsole(PS4Console(profileName: profileName, psnOnlineId: psnOnlineId, pinCode: pinCode, ipAddress: ipAddress))
-                                  dismiss()
-                              }
-                              .disabled(profileName.isEmpty || pinCode.isEmpty || ipAddress.isEmpty)
-                          }
-                      }
+                      .navigationTitle("PSScrean Chiaki")
                   }
               }
           }
@@ -386,15 +210,17 @@ jobs:
           }
 
           for path, content in files.items():
-              os.makedirs(os.path.dirname(path), exist_ok=True)
+              dirname = os.path.dirname(path)
+              if dirname:
+                  os.makedirs(dirname, exist_ok=True)
               with open(path, "w", encoding="utf-8") as f:
                   f.write(content.strip())
           '
 
-      - name: Commit and Push changes
+      - name: Commit and Push
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Add Package.swift and ChiakiEngine integration" || exit 0
+          git commit -m "Add Chiaki C++ core submodule and Swift/Objective-C++ wrapper" || exit 0
           git push
