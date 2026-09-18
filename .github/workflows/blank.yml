@@ -1,7 +1,7 @@
 name: Generate PSScrean Files Structure
 
 on:
-  workflow_dispatch: # Pozwala uruchomić proces ręcznie jednym kliknięciem
+  workflow_dispatch:
 
 jobs:
   create-files:
@@ -43,6 +43,50 @@ jobs:
               var psnOnlineId: String
               var pinCode: String
               var ipAddress: String
+              var isAutoConnect: Bool = false
+          }
+
+          struct DiscoveredConsole: Identifiable {
+              var id = UUID()
+              var hostName: String
+              var ipAddress: String
+              var status: String
+          }
+          """,
+              f"{PROJECT_NAME}/Services/NetworkDiscovery.swift": """import Foundation
+          import Network
+
+          class NetworkDiscovery: ObservableObject {
+              @Published var discoveredConsoles: [DiscoveredConsole] = []
+              @Published var isScanning = false
+              
+              private var listener: NWListener?
+              
+              func startDiscovery() {
+                  isScanning = true
+                  discoveredConsoles.removeAll()
+                  
+                  // Domyślny port wyszukiwania PS4 w sieci lokalnej (UDP 987)
+                  let packet = "SRCH * HTTP/1.1\\r\\ndevice-discovery-protocol-version:0002000\\r\\n\\r\\n"
+                  guard let data = packet.data(using: .utf8) else { return }
+                  
+                  let host = NWEndpoint.Host("255.255.255.255")
+                  let port = NWEndpoint.Port(integerLiteral: 987)
+                  
+                  let connection = NWConnection(host: host, port: port, using: .udp)
+                  connection.start(queue: .global())
+                  
+                  connection.send(content: data, completion: .contentProcessed({ error in
+                      if let error = error {
+                          print("Błąd wysyłania pakietu discovery: \\(error)")
+                      }
+                  }))
+                  
+                  // Wyłączanie skanowania po 5 sekundach
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                      self.isScanning = false
+                  }
+              }
           }
           """,
               f"{PROJECT_NAME}/ViewModels/ConsoleManager.swift": """import Foundation
@@ -78,39 +122,110 @@ jobs:
               }
           }
           """,
+              f"{PROJECT_NAME}/Views/VirtualControllerView.swift": """import SwiftUI
+
+          struct VirtualControllerView: View {
+              var body: some View {
+                  HStack {
+                      // D-PAD / Left Stick
+                      VStack {
+                          Button(action: {}) { Image(systemName: "chevron.up.circle.fill").font(.system(size: 45)) }
+                          HStack(spacing: 20) {
+                              Button(action: {}) { Image(systemName: "chevron.left.circle.fill").font(.system(size: 45)) }
+                              Button(action: {}) { Image(systemName: "chevron.right.circle.fill").font(.system(size: 45)) }
+                          }
+                          Button(action: {}) { Image(systemName: "chevron.down.circle.fill").font(.system(size: 45)) }
+                      }
+                      .foregroundColor(.white.opacity(0.8))
+                      
+                      Spacer()
+                      
+                      // Action Buttons (Triangle, Circle, Cross, Square)
+                      VStack {
+                          Button(action: {}) { Image(systemName: "triangle.circle.fill").font(.system(size: 45)).foregroundColor(.green) }
+                          HStack(spacing: 20) {
+                              Button(action: {}) { Image(systemName: "square.circle.fill").font(.system(size: 45)).foregroundColor(.pink) }
+                              Button(action: {}) { Image(systemName: "circle.circle.fill").font(.system(size: 45)).foregroundColor(.red) }
+                          }
+                          Button(action: {}) { Image(systemName: "multiply.circle.fill").font(.system(size: 45)).foregroundColor(.blue) }
+                      }
+                  }
+                  .padding(.horizontal, 30)
+              }
+          }
+          """,
+              f"{PROJECT_NAME}/Views/StreamView.swift": """import SwiftUI
+
+          struct StreamView: View {
+              let console: PS4Console
+              
+              var body: some View {
+                  ZStack {
+                      Color.black.ignoresSafeArea()
+                      
+                      VStack {
+                          HStack {
+                              Text("PS4 Stream: \\(console.profileName)")
+                                  .font(.caption)
+                                  .foregroundColor(.gray)
+                              Spacer()
+                          }
+                          .padding()
+                          
+                          Spacer()
+                          
+                          // Wirtualny pad nakładany na obraz
+                          VirtualControllerView()
+                              .padding(.bottom, 20)
+                      }
+                  }
+                  .navigationBarTitleDisplayMode(.inline)
+              }
+          }
+          """,
               f"{PROJECT_NAME}/Views/ContentView.swift": """import SwiftUI
 
           struct ContentView: View {
               @StateObject private var manager = ConsoleManager()
+              @StateObject private var discovery = NetworkDiscovery()
               @State private var showingAddModal = false
               
               var body: some View {
                   NavigationView {
                       List {
-                          if manager.consoles.isEmpty {
-                              ContentUnavailableView(
-                                  "Brak połączonych PS4",
-                                  systemImage: "gamecontroller",
-                                  description: Text("Naciśnij +, aby dodać swoją pierwszą konsolę.")
-                              )
-                          } else {
-                              ForEach(manager.consoles) { console in
-                                  NavigationLink(destination: StreamView(console: console)) {
-                                      HStack {
-                                          Image(systemName: "playstation.house")
-                                              .font(.title2)
-                                              .foregroundColor(.blue)
-                                          VStack(alignment: .leading) {
-                                              Text(console.profileName)
-                                                  .font(.headline)
-                                              Text("PSN: \\(console.psnOnlineId) | IP: \\(console.ipAddress)")
-                                                  .font(.subcaption)
-                                                  .foregroundColor(.gray)
-                                          }
+                          Section(header: Text("Automatyczne wyszukiwanie Wi-Fi")) {
+                              Button(action: { discovery.startDiscovery() }) {
+                                  HStack {
+                                      Image(systemName: "wifi")
+                                      Text(discovery.isScanning ? "Skanowanie sieci..." : "Szukaj PS4 w sieci Wi-Fi")
+                                      if discovery.isScanning {
+                                          Spacer()
+                                          ProgressView()
                                       }
                                   }
                               }
-                              .onDelete(perform: manager.deleteConsole)
+                          }
+                          
+                          Section(header: Text("Zapisane Konsole")) {
+                              if manager.consoles.isEmpty {
+                                  Text("Brak zapisanych konsol. Kliknij +, aby dodać.")
+                                      .foregroundColor(.gray)
+                                      .font(.subheadline)
+                              } else {
+                                  ForEach(manager.consoles) { console in
+                                      NavigationLink(destination: StreamView(console: console)) {
+                                          HStack {
+                                              Image(systemName: "playstation.house.fill")
+                                                  .foregroundColor(.blue)
+                                              VStack(alignment: .leading) {
+                                                  Text(console.profileName).font(.headline)
+                                                  Text("IP: \\(console.ipAddress)").font(.caption).foregroundColor(.gray)
+                                              }
+                                          }
+                                      }
+                                  }
+                                  .onDelete(perform: manager.deleteConsole)
+                              }
                           }
                       }
                       .navigationTitle("PSScrean")
@@ -118,7 +233,6 @@ jobs:
                           ToolbarItem(placement: .navigationBarTrailing) {
                               Button(action: { showingAddModal = true }) {
                                   Image(systemName: "plus")
-                                      .font(.title3)
                               }
                           }
                       }
@@ -143,13 +257,13 @@ jobs:
               var body: some View {
                   NavigationView {
                       Form {
-                          Section(header: Text("Dane użytkownika")) {
-                              TextField("Nick w aplikacji (np. Pokój)", text: $profileName)
+                          Section(header: Text("Profil konsoli")) {
+                              TextField("Nazwa (np. Salon)", text: $profileName)
                               TextField("Nick PSN ID", text: $psnOnlineId)
                                   .autocapitalization(.none)
                           }
                           
-                          Section(header: Text("Połączenie z PS4")) {
+                          Section(header: Text("Połączenie PS4")) {
                               TextField("Kod PIN z PS4 (8 cyfr)", text: $pinCode)
                                   .keyboardType(.numberPad)
                               TextField("Adres IP PS4 (np. 192.168.1.50)", text: $ipAddress)
@@ -157,52 +271,17 @@ jobs:
                           }
                       }
                       .navigationTitle("Dodaj PS4")
-                      .navigationBarTitleDisplayMode(.inline)
                       .toolbar {
-                          ToolbarItem(placement: .cancellationAction) {
-                              Button("Anuluj") { dismiss() }
-                          }
+                          ToolbarItem(placement: .cancellationAction) { Button("Anuluj") { dismiss() } }
                           ToolbarItem(placement: .confirmationAction) {
                               Button("Zapisz") {
-                                  let newConsole = PS4Console(
-                                      profileName: profileName,
-                                      psnOnlineId: psnOnlineId,
-                                      pinCode: pinCode,
-                                      ipAddress: ipAddress
-                                  )
-                                  manager.addConsole(newConsole)
+                                  manager.addConsole(PS4Console(profileName: profileName, psnOnlineId: psnOnlineId, pinCode: pinCode, ipAddress: ipAddress))
                                   dismiss()
                               }
                               .disabled(profileName.isEmpty || pinCode.isEmpty || ipAddress.isEmpty)
                           }
                       }
                   }
-              }
-          }
-          """,
-              f"{PROJECT_NAME}/Views/StreamView.swift": """import SwiftUI
-
-          struct StreamView: View {
-              let console: PS4Console
-              
-              var body: some View {
-                  ZStack {
-                      Color.black.ignoresSafeArea()
-                      VStack(spacing: 20) {
-                          Text("Łączenie z \\(console.profileName)...")
-                              .foregroundColor(.white)
-                              .font(.headline)
-                          
-                          ProgressView()
-                              .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                          
-                          Text("IP: \\(console.ipAddress) | PIN: \\(console.pinCode)")
-                              .font(.caption)
-                              .foregroundColor(.gray)
-                      }
-                  }
-                  .navigationTitle(console.profileName)
-                  .navigationBarTitleDisplayMode(.inline)
               }
           }
           """
@@ -219,5 +298,5 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add PSScrean/
-          git commit -m "Generate PSScrean project structure and Swift files" || exit 0
+          git commit -m "Add UDP Discovery service and VirtualControllerView" || exit 0
           git push
