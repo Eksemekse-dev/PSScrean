@@ -1,59 +1,223 @@
-name: Build PSScrean iOS App
+name: Generate PSScrean Files Structure
 
 on:
-  push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch: # Pozwala uruchomić budowanie ręcznie z poziomu zakładki Actions na GitHubie
+  workflow_dispatch: # Pozwala uruchomić proces ręcznie jednym kliknięciem
 
 jobs:
-  build:
-    name: Build iOS Application
-    runs-on: macos-14 # Używa najnowszych runnerów macOS z obsługą Xcode 15+
+  create-files:
+    runs-on: ubuntu-latest
 
     steps:
-      # 1. Pobranie kodu repozytorium
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Wybór odpowiedniej wersji Xcode
-      - name: Select Xcode version
-        uses: maxim-lobanov/setup-xcode@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          xcode-version: '15.4'
+          python-version: '3.x'
 
-      # 3. Generowanie tymczasowego projektu Xcode z plików źródłowych
-      - name: Generate Xcode Project
+      - name: Create Structure and Swift Files
         run: |
-          mkdir -p PSScrean.xcodeproj
-          cat << 'EOF' > PSScrean.xcodeproj/project.pbxproj
-          // Minimalna struktura projektu tworzona automatycznie podczas budowania
-          EOF
+          python -c '
+          import os
 
-      # 4. Budowanie aplikacji dla iOS Simulator / Device (bez konieczności płatnego konta Apple Developer)
-      - name: Build App for iOS
+          PROJECT_NAME = "PSScrean"
+
+          files = {
+              f"{PROJECT_NAME}/App/{PROJECT_NAME}App.swift": """import SwiftUI
+
+          @main
+          struct PSScreanApp: App {
+              var body: some Scene {
+                  WindowGroup {
+                      ContentView()
+                  }
+              }
+          }
+          """,
+              f"{PROJECT_NAME}/Models/PS4Console.swift": """import Foundation
+
+          struct PS4Console: Identifiable, Codable {
+              var id = UUID()
+              var profileName: String
+              var psnOnlineId: String
+              var pinCode: String
+              var ipAddress: String
+          }
+          """,
+              f"{PROJECT_NAME}/ViewModels/ConsoleManager.swift": """import Foundation
+
+          class ConsoleManager: ObservableObject {
+              @Published var consoles: [PS4Console] = [] {
+                  didSet { saveConsoles() }
+              }
+              
+              private let saveKey = "SavedPS4Consoles"
+              
+              init() { loadConsoles() }
+              
+              func addConsole(_ console: PS4Console) {
+                  consoles.append(console)
+              }
+              
+              func deleteConsole(at offsets: IndexSet) {
+                  consoles.remove(atOffsets: offsets)
+              }
+              
+              private func saveConsoles() {
+                  if let encoded = try? JSONEncoder().encode(consoles) {
+                      UserDefaults.standard.set(encoded, forKey: saveKey)
+                  }
+              }
+              
+              private func loadConsoles() {
+                  if let data = UserDefaults.standard.data(forKey: saveKey),
+                     let decoded = try? JSONDecoder().decode([PS4Console].self, from: data) {
+                      consoles = decoded
+                  }
+              }
+          }
+          """,
+              f"{PROJECT_NAME}/Views/ContentView.swift": """import SwiftUI
+
+          struct ContentView: View {
+              @StateObject private var manager = ConsoleManager()
+              @State private var showingAddModal = false
+              
+              var body: some View {
+                  NavigationView {
+                      List {
+                          if manager.consoles.isEmpty {
+                              ContentUnavailableView(
+                                  "Brak połączonych PS4",
+                                  systemImage: "gamecontroller",
+                                  description: Text("Naciśnij +, aby dodać swoją pierwszą konsolę.")
+                              )
+                          } else {
+                              ForEach(manager.consoles) { console in
+                                  NavigationLink(destination: StreamView(console: console)) {
+                                      HStack {
+                                          Image(systemName: "playstation.house")
+                                              .font(.title2)
+                                              .foregroundColor(.blue)
+                                          VStack(alignment: .leading) {
+                                              Text(console.profileName)
+                                                  .font(.headline)
+                                              Text("PSN: \\(console.psnOnlineId) | IP: \\(console.ipAddress)")
+                                                  .font(.subcaption)
+                                                  .foregroundColor(.gray)
+                                          }
+                                      }
+                                  }
+                              }
+                              .onDelete(perform: manager.deleteConsole)
+                          }
+                      }
+                      .navigationTitle("PSScrean")
+                      .toolbar {
+                          ToolbarItem(placement: .navigationBarTrailing) {
+                              Button(action: { showingAddModal = true }) {
+                                  Image(systemName: "plus")
+                                      .font(.title3)
+                              }
+                          }
+                      }
+                      .sheet(isPresented: $showingAddModal) {
+                          AddConsoleView(manager: manager)
+                      }
+                  }
+              }
+          }
+          """,
+              f"{PROJECT_NAME}/Views/AddConsoleView.swift": """import SwiftUI
+
+          struct AddConsoleView: View {
+              @Environment(\\.dismiss) var dismiss
+              @ObservedObject var manager: ConsoleManager
+              
+              @State private var profileName = ""
+              @State private var psnOnlineId = ""
+              @State private var pinCode = ""
+              @State private var ipAddress = ""
+              
+              var body: some View {
+                  NavigationView {
+                      Form {
+                          Section(header: Text("Dane użytkownika")) {
+                              TextField("Nick w aplikacji (np. Pokój)", text: $profileName)
+                              TextField("Nick PSN ID", text: $psnOnlineId)
+                                  .autocapitalization(.none)
+                          }
+                          
+                          Section(header: Text("Połączenie z PS4")) {
+                              TextField("Kod PIN z PS4 (8 cyfr)", text: $pinCode)
+                                  .keyboardType(.numberPad)
+                              TextField("Adres IP PS4 (np. 192.168.1.50)", text: $ipAddress)
+                                  .keyboardType(.decimalPad)
+                          }
+                      }
+                      .navigationTitle("Dodaj PS4")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .cancellationAction) {
+                              Button("Anuluj") { dismiss() }
+                          }
+                          ToolbarItem(placement: .confirmationAction) {
+                              Button("Zapisz") {
+                                  let newConsole = PS4Console(
+                                      profileName: profileName,
+                                      psnOnlineId: psnOnlineId,
+                                      pinCode: pinCode,
+                                      ipAddress: ipAddress
+                                  )
+                                  manager.addConsole(newConsole)
+                                  dismiss()
+                              }
+                              .disabled(profileName.isEmpty || pinCode.isEmpty || ipAddress.isEmpty)
+                          }
+                      }
+                  }
+              }
+          }
+          """,
+              f"{PROJECT_NAME}/Views/StreamView.swift": """import SwiftUI
+
+          struct StreamView: View {
+              let console: PS4Console
+              
+              var body: some View {
+                  ZStack {
+                      Color.black.ignoresSafeArea()
+                      VStack(spacing: 20) {
+                          Text("Łączenie z \\(console.profileName)...")
+                              .foregroundColor(.white)
+                              .font(.headline)
+                          
+                          ProgressView()
+                              .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                          
+                          Text("IP: \\(console.ipAddress) | PIN: \\(console.pinCode)")
+                              .font(.caption)
+                              .foregroundColor(.gray)
+                      }
+                  }
+                  .navigationTitle(console.profileName)
+                  .navigationBarTitleDisplayMode(.inline)
+              }
+          }
+          """
+          }
+
+          for path, content in files.items():
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(content.strip())
+          '
+
+      - name: Commit and Push changes
         run: |
-          xcodebuild build \
-            -scheme "PSScrean" \
-            -sdk iphonesimulator \
-            -configuration Release \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            BUILD_DIR=build
-
-      # 5. Przygotowanie paczki .ipa / .app do pobrania
-      - name: Compress Build Artifacts
-        run: |
-          mkdir -p Payload
-          cp -r build/Release-iphonesimulator/*.app Payload/ 2>/dev/null || cp -r build/Build/Products/Release-iphonesimulator/*.app Payload/
-          zip -r PSScrean.ipa Payload
-
-      # 6. Wrzucenie zbudowanego pliku jako plik do pobrania z GitHuba (Artifact)
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: PSScrean-iOS-Build
-          path: PSScrean.ipa
-          retention-days: 14
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add PSScrean/
+          git commit -m "Generate PSScrean project structure and Swift files" || exit 0
+          git push
