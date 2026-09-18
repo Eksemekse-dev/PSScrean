@@ -8,14 +8,15 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout main repository
         uses: actions/checkout@v4
 
-      - name: Clone Chiaki C++ Core from GitHub
-        run: |
-          if [ ! -d "ChiakiCore" ]; then
-            git clone --recursive https://github.com/thestranger/chiaki.git ChiakiCore
-          fi
+      - name: Checkout Chiaki Core Repository
+        uses: actions/checkout@v4
+        with:
+          repository: 'thestranger/chiaki'
+          path: 'ChiakiCore'
+          submodules: 'recursive'
 
       - name: Create Structure and C++/Swift Files
         run: |
@@ -25,7 +26,6 @@ jobs:
           PROJECT_NAME = "PSScrean"
 
           files = {
-              # Package.swift z obsluga C++
               "Package.swift": """// swift-tools-version: 5.9
           import PackageDescription
 
@@ -50,7 +50,6 @@ jobs:
           )
           """,
 
-              # Header pliku Bridge C++ -> Objective-C++ -> Swift
               f"{PROJECT_NAME}/Bridge/ChiakiWrapper.h": """#import <Foundation/Foundation.h>
 
           NS_ASSUME_NONNULL_BEGIN
@@ -69,49 +68,35 @@ jobs:
           NS_ASSUME_NONNULL_END
           """,
 
-              # Implementacja C++ Wrapper (mostek miedzy Swift a Chiaki Core)
               f"{PROJECT_NAME}/Bridge/ChiakiWrapper.mm": """#import "ChiakiWrapper.h"
-
-          // Importy naglowkow C/C++ z biblioteki Chiaki
           #include <iostream>
 
-          @implementation ChiakiWrapper {
-              // Miejsce na wskaznik do instancji sesji Chiaki w C++
-              // chiaki::Session* _session;
-          }
+          @implementation ChiakiWrapper
 
           - (instancetype)init {
               self = [super init];
               if (self) {
-                  NSLog(@"[Chiaki Core C++] Inicjalizacja pakietu Chiaki Native...");
+                  NSLog(@"[Chiaki Core C++] Inicjalizacja...");
               }
               return self;
           }
 
           - (BOOL)connectToConsoleWithIP:(NSString *)ipAddress psnId:(NSString *)psnId pinCode:(NSString *)pinCode {
-              const char* cIp = [ipAddress UTF8String];
-              const char* cPsnId = [psnId UTF8String];
-              const char* cPin = [pinCode UTF8String];
-
-              NSLog(@"[Chiaki Core C++] Wywolanie native connect: IP=%s, PSN=%s, PIN=%s", cIp, cPsnId, cPin);
-              
-              // Tutaj nastepuje bezposrednie wywolanie funkcji z C++ Chiaki Lib
+              NSLog(@"[Chiaki Core C++] Polaczenie do IP: %@", ipAddress);
               return YES;
           }
 
           - (void)sendButtonInput:(NSString *)button isPressed:(BOOL)isPressed {
-              const char* cBtn = [button UTF8String];
-              NSLog(@"[Chiaki Core C++] Input C++ -> Przycisk: %s, Stan: %d", cBtn, isPressed);
+              NSLog(@"[Chiaki Core C++] Input: %@ - %d", button, isPressed);
           }
 
           - (void)disconnect {
-              NSLog(@"[Chiaki Core C++] Rozlaczenie sesji C++.");
+              NSLog(@"[Chiaki Core C++] Rozlaczenie.");
           }
 
           @end
           """,
 
-              # Swift Engine korzystajacy z C++ Wrappera
               f"{PROJECT_NAME}/Engine/ChiakiEngine.swift": """import Foundation
           import Combine
 
@@ -124,7 +109,6 @@ jobs:
 
           public class ChiakiEngine: ObservableObject {
               @Published public var state: StreamState = .idle
-              
               private var cppWrapper: ChiakiWrapper
               
               public init() {
@@ -136,13 +120,8 @@ jobs:
                   
                   DispatchQueue.global(qos: .userInitiated).async {
                       let success = self.cppWrapper.connectToConsole(withIP: ipAddress, psnId: psnId, pinCode: pinCode)
-                      
                       DispatchQueue.main.async {
-                          if success {
-                              self.state = .streaming
-                          } else {
-                              self.state = .error("Nie udalo sie polaczyc z Chiaki C++ Core")
-                          }
+                          self.state = success ? .streaming : .error("Blad polaczenia C++")
                       }
                   }
               }
@@ -158,7 +137,6 @@ jobs:
           }
           """,
 
-              # Główny widok App
               f"{PROJECT_NAME}/App/{PROJECT_NAME}App.swift": """import SwiftUI
 
           @main
@@ -181,26 +159,18 @@ jobs:
 
               var body: some View {
                   NavigationView {
-                      VStack(spacing: 20) {
-                          Form {
-                              Section(header: Text("Chiaki Native C++ Core")) {
-                                  TextField("IP PS4", text: $ipAddress)
-                                  TextField("PSN Account ID", text: $psnId)
-                                  TextField("PIN (8 cyfr)", text: $pinCode)
-                              }
-                              
-                              Section {
-                                  Button("Uruchom Remote Play (C++)") {
-                                      engine.startStream(ipAddress: ipAddress, psnId: psnId, pinCode: pinCode)
-                                  }
-                              }
+                      Form {
+                          Section(header: Text("Chiaki Native C++ Core")) {
+                              TextField("IP PS4", text: $ipAddress)
+                              TextField("PSN ID", text: $psnId)
+                              TextField("PIN (8 cyfr)", text: $pinCode)
                           }
                           
-                          Spacer()
-                          
-                          Text("Stan silnika: \\(String(describing: engine.state))")
-                              .font(.footnote)
-                              .foregroundColor(.gray)
+                          Section {
+                              Button("Uruchom Remote Play (C++)") {
+                                  engine.startStream(ipAddress: ipAddress, psnId: psnId, pinCode: pinCode)
+                              }
+                          }
                       }
                       .navigationTitle("PSScrean Chiaki")
                   }
@@ -222,5 +192,5 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Add Chiaki C++ core submodule and Swift/Objective-C++ wrapper" || exit 0
+          git commit -m "Add Chiaki C++ core via checkout action" || exit 0
           git push
