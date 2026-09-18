@@ -6,20 +6,23 @@ struct StreamView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VStack(spacing: 20) {
-                Text("Łączenie z \(console.profileName)...")
-                    .foregroundColor(.white)
-                    .font(.headline)
+            
+            VStack {
+                HStack {
+                    Text("PS4 Stream: \(console.profileName)")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                    Spacer()
+                }
+                .padding()
                 
-                ProgressView()
-                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                Spacer()
                 
-                Text("IP: \(console.ipAddress) | PIN: \(console.pinCode)")
-                    .font(.caption)
-                    .foregroundColor(.gray)
+                // Wirtualny pad nakładany na obraz
+                VirtualControllerView()
+                    .padding(.bottom, 20)
             }
         }
-        .navigationTitle(console.profileName)
         .navigationBarTitleDisplayMode(.inline)
     }
 }
